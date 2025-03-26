@@ -1,0 +1,96 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAdmin() {
+      return request.auth != null && request.auth.token.email.matches(".*@admin[.]com$");
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidTimestamp() {
+      return request.resource.data.timestamp is timestamp;
+    }
+
+    function isValidLocation() {
+      let loc = request.resource.data.location;
+      return loc is map && 
+             loc.lat is number && 
+             loc.lng is number &&
+             loc.lat >= -90 && 
+             loc.lat <= 90 &&
+             loc.lng >= -180 && 
+             loc.lng <= 180;
+    }
+
+    function isValidStatus() {
+      return request.resource.data.status in ['present', 'absent'];
+    }
+
+    function isValidMode() {
+      return request.resource.data.mode in ['online', 'offline'];
+    }
+
+    function isToday(date) {
+      let today = request.time.toDate();
+      let recordDate = date.toDate();
+      return recordDate.year() == today.year() &&
+             recordDate.month() == today.month() &&
+             recordDate.day() == today.day();
+    }
+
+    // Batches collection rules
+    match /batches/{batchId} {
+      // Allow reading batch data without authentication
+      allow read, list: if true;
+      
+      // Only admins can create, update, or delete batches
+      allow create: if isAdmin() && 
+                      request.resource.data.keys().hasAll(['name', 'course', 'startDate', 'students']) &&
+                      request.resource.data.name is string &&
+                      request.resource.data.course is string &&
+                      request.resource.data.startDate is string &&
+                      request.resource.data.students is list;
+      
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Attendance collection rules
+    match /attendance/{attendanceId} {
+      // Allow admins full access
+      allow read, delete: if isAdmin();
+      
+      // Admin can update attendance with additional validation
+      allow update: if isAdmin() && 
+                      isValidStatus() &&
+                      request.resource.data.markedByAdmin == true;
+
+      // Allow reading attendance records for the student's own records
+      allow read: if request.auth != null && 
+                    resource.data.studentId == request.auth.uid;
+
+      // Allow creating attendance records without authentication
+      allow create: if request.resource.data.keys().hasAll(['batchId', 'studentId', 'date', 'status', 'location', 'deviceId']) &&
+                   isValidTimestamp() &&
+                   isValidStatus() &&
+                   isValidMode() &&
+                   isValidLocation() &&
+                   isToday(request.resource.data.date) &&
+                   request.resource.data.deviceId is string &&
+                   request.resource.data.date is timestamp &&
+                   request.resource.data.date.toMillis() <= request.time.toMillis();
+
+      // Allow querying attendance records
+      allow list: if true;
+    }
+
+    // Default deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
