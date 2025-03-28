@@ -25,7 +25,8 @@ import {
   getDocs,
   serverTimestamp,
   orderBy,
-  Timestamp
+  Timestamp,
+  onSnapshot
 } from 'firebase/firestore';
 import { db } from '../../firebase/config';
 import { 
@@ -74,7 +75,35 @@ const Attendance = () => {
 
   useEffect(() => {
     if (selectedBatch) {
-      dispatch(fetchTodayAttendanceAction(selectedBatch));
+      // Set up real-time listener for attendance updates
+      const attendanceRef = collection(db, 'attendance');
+      const today = new Date();
+      const startOfDay = new Date(today.setHours(0, 0, 0, 0)).toISOString();
+      const endOfDay = new Date(today.setHours(23, 59, 59, 999)).toISOString();
+
+      const q = query(
+        attendanceRef,
+        where('batchId', '==', selectedBatch),
+        where('date', '>=', startOfDay),
+        where('date', '<=', endOfDay),
+        orderBy('date', 'desc')
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const records = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          timestamp: doc.data().timestamp?.seconds ? doc.data().timestamp.seconds * 1000 : Date.now()
+        }));
+        
+        // Update todayRecords in Redux store
+        dispatch(fetchTodayAttendanceAction.fulfilled(records));
+      }, (error) => {
+        console.error('Error in attendance listener:', error);
+        toast.error('Error monitoring attendance updates');
+      });
+
+      return () => unsubscribe();
     }
   }, [selectedBatch, dispatch]);
 
@@ -475,6 +504,7 @@ const Attendance = () => {
                       record.studentId === student.id && 
                       format(new Date(record.date), 'yyyy-MM-dd') === selectedDate
                     );
+                    
                     return (
                       <tr 
                         key={student.id}
@@ -517,9 +547,17 @@ const Attendance = () => {
                             }`}>
                               {getAttendanceIcon(currentRecord)}
                               {currentRecord.status.charAt(0).toUpperCase() + currentRecord.status.slice(1)}
+                              {currentRecord.markedByAdmin && (
+                                <span className="ml-1 text-xs text-gray-500">(Admin)</span>
+                              )}
                             </span>
                           ) : (
                             <span className="text-gray-500">Not Marked</span>
+                          )}
+                          {currentRecord && (
+                            <span className="ml-2 text-xs text-gray-500">
+                              {format(new Date(currentRecord.date), 'HH:mm')}
+                            </span>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">

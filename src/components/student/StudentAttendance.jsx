@@ -12,7 +12,8 @@ import {
   Info,
   Smartphone,
   Wifi,
-  WifiOff
+  WifiOff,
+  Navigation
 } from 'lucide-react';
 import { addAttendanceRecord } from '../../store/slices/attendanceSlice';
 import { updateHistory } from '../../store/slices/scheduleSlice';
@@ -22,17 +23,27 @@ import { toast } from 'react-toastify';
 import { format } from 'date-fns';
 
 const getDeviceId = () => {
-  const storedId = localStorage.getItem('deviceId');
-  if (storedId) return storedId;
-  
-  // Enhanced device fingerprinting
-  const userAgent = navigator.userAgent;
-  const platform = navigator.platform;
-  const screenResolution = `${window.screen.width}x${window.screen.height}`;
-  const deviceId = btoa(`${userAgent}-${platform}-${screenResolution}-${Date.now()}`);
-  
-  localStorage.setItem('deviceId', deviceId);
-  return deviceId;
+  try {
+    const storedId = localStorage.getItem('deviceId');
+    if (storedId) return storedId;
+    
+    const components = [
+      navigator.userAgent,
+      navigator.platform,
+      `${window.screen.width}x${window.screen.height}`,
+      window.screen.colorDepth,
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+      navigator.language,
+      Date.now()
+    ].filter(Boolean);
+    
+    const deviceId = btoa(components.join('-'));
+    localStorage.setItem('deviceId', deviceId);
+    return deviceId;
+  } catch (error) {
+    console.error('Error generating device ID:', error);
+    return `fallback-${Date.now()}-${Math.random()}`;
+  }
 };
 
 const StudentAttendance = () => {
@@ -50,8 +61,16 @@ const StudentAttendance = () => {
   const [isGettingLocation, setIsGettingLocation] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [locationAccuracy, setLocationAccuracy] = useState(null);
+  const [locationWatchId, setLocationWatchId] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
 
   useEffect(() => {
+    if (!window.isSecureContext) {
+      console.warn('Application is not running in a secure context. Geolocation may not work.');
+      setIsSecureContext(false);
+    }
+
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
 
@@ -61,13 +80,18 @@ const StudentAttendance = () => {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      if (locationWatchId) {
+        navigator.geolocation.clearWatch(locationWatchId);
+      }
     };
-  }, []);
+  }, [locationWatchId]);
 
   useEffect(() => {
     const fetchBatchDetails = async () => {
       try {
         if (!batchId) {
+          console.error('No batch ID provided');
+          toast.error('Invalid attendance link');
           navigate('/404');
           return;
         }
@@ -76,6 +100,8 @@ const StudentAttendance = () => {
         const batchDoc = await getDoc(batchRef);
         
         if (!batchDoc.exists()) {
+          console.error('Batch not found:', batchId);
+          toast.error('Invalid batch ID or batch not found');
           navigate('/404');
           return;
         }
@@ -101,7 +127,7 @@ const StudentAttendance = () => {
           setHasMarkedAttendance(true);
         }
       } catch (error) {
-        console.error('Error fetching batch details:', error);
+        console.error('Error in fetchBatchDetails:', error);
         toast.error('Error loading batch details');
         navigate('/404');
       } finally {
@@ -112,14 +138,33 @@ const StudentAttendance = () => {
     fetchBatchDetails();
   }, [batchId, deviceId, navigate]);
 
-  const getCurrentLocation = () => {
+  const getCurrentLocation = async () => {
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser');
       return;
     }
 
+    if (!isSecureContext) {
+      setLocationError('Location services require a secure (HTTPS) connection');
+      return;
+    }
+
     setIsGettingLocation(true);
     setLocationError(null);
+
+    // First, request permission explicitly
+    try {
+      const permissionResult = await navigator.permissions.query({ name: 'geolocation' });
+      
+      if (permissionResult.state === 'denied') {
+        setLocationError('Location access is blocked. Please enable location services in your browser settings.');
+        setIsGettingLocation(false);
+        return;
+      }
+    } catch (error) {
+      console.warn('Permission check failed:', error);
+      // Continue anyway as some browsers might not support permissions API
+    }
 
     const options = {
       enableHighAccuracy: true,
@@ -127,35 +172,90 @@ const StudentAttendance = () => {
       maximumAge: 0
     };
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLocation({
+    // Clear existing watch
+    if (locationWatchId) {
+      navigator.geolocation.clearWatch(locationWatchId);
+    }
+
+    const handleSuccess = (position) => {
+      try {
+        const newLocation = {
           lat: position.coords.latitude,
           lng: position.coords.longitude
-        });
+        };
+        setLocation(newLocation);
         setLocationAccuracy(position.coords.accuracy);
         setIsGettingLocation(false);
-        toast.success('Location acquired successfully');
-      },
-      (error) => {
-        console.error('Geolocation error:', error);
-        setLocationError(getLocationErrorMessage(error.code));
+        setLocationError(null);
+        
+        if (position.coords.accuracy <= 20) {
+          if (locationWatchId) {
+            navigator.geolocation.clearWatch(locationWatchId);
+            setLocationWatchId(null);
+          }
+          toast.success('Location acquired successfully');
+        }
+      } catch (error) {
+        console.error('Error processing location:', error);
+        setLocationError('Error processing location data');
         setIsGettingLocation(false);
-      },
-      options
-    );
-  };
+      }
+    };
 
-  const getLocationErrorMessage = (code) => {
-    switch (code) {
-      case 1: return 'Please allow location access to mark attendance';
-      case 2: return 'Unable to determine your location. Please try again';
-      case 3: return 'Location request timed out. Please try again';
-      default: return 'Error getting location. Please try again';
+    const handleError = (error) => {
+      console.error('Geolocation error:', error);
+      let errorMessage = 'Error getting location. Please try again.';
+      
+      switch (error.code) {
+        case 1: // PERMISSION_DENIED
+          errorMessage = 'Location access denied. Please enable location services in your device and browser settings.';
+          // Show instructions for common browsers
+          toast.info('To enable location: Check your browser\'s site settings and device location services.');
+          break;
+        case 2: // POSITION_UNAVAILABLE
+          errorMessage = 'Location information is unavailable. Please check your GPS signal and try again.';
+          break;
+        case 3: // TIMEOUT
+          errorMessage = 'Location request timed out. Please try again in a better signal area.';
+          break;
+      }
+      
+      setLocationError(errorMessage);
+      setIsGettingLocation(false);
+
+      if (error.code === 1 && retryCount < 3) {
+        setRetryCount(prev => prev + 1);
+      }
+    };
+
+    // Try getting location
+    try {
+      // First try a single high-accuracy position
+      navigator.geolocation.getCurrentPosition(handleSuccess, handleError, options);
+
+      // Then start watching for better accuracy
+      const watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, options);
+      setLocationWatchId(watchId);
+
+      // Set a timeout to stop watching after 30 seconds
+      setTimeout(() => {
+        if (locationWatchId === watchId) {
+          navigator.geolocation.clearWatch(watchId);
+          setLocationWatchId(null);
+          if (location && locationAccuracy > 20) {
+            toast.warning('Could not get high accuracy location, but current location can be used');
+          }
+        }
+      }, 30000);
+    } catch (error) {
+      console.error('Geolocation API error:', error);
+      setLocationError('Unexpected error accessing location services');
+      setIsGettingLocation(false);
     }
   };
 
   const areLocationsClose = (loc1, loc2, threshold = 0.0001) => {
+    if (!loc1 || !loc2) return false;
     const latDiff = Math.abs(loc1.lat - loc2.lat);
     const lngDiff = Math.abs(loc1.lng - loc2.lng);
     return latDiff < threshold && lngDiff < threshold;
@@ -235,6 +335,9 @@ const StudentAttendance = () => {
           userAgent: navigator.userAgent,
           platform: navigator.platform,
           screenResolution: `${window.screen.width}x${window.screen.height}`,
+          colorDepth: window.screen.colorDepth,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          language: navigator.language,
           isMobile: /Mobile|Android|iOS/.test(navigator.userAgent)
         },
         timestamp
@@ -255,7 +358,7 @@ const StudentAttendance = () => {
       toast.success('Attendance marked successfully!');
     } catch (error) {
       console.error('Error marking attendance:', error);
-      toast.error('Error marking attendance. Please try again');
+      toast.error(`Error marking attendance: ${error.message}`);
     } finally {
       setSubmitting(false);
     }
@@ -334,6 +437,15 @@ const StudentAttendance = () => {
             <p className="text-white/80 mt-1">Please fill in your attendance details</p>
           </div>
 
+          {!isSecureContext && (
+            <div className="bg-yellow-50 p-4 flex items-center">
+              <AlertTriangle className="text-yellow-500 mr-2" size={20} />
+              <p className="text-yellow-700">
+                This site requires a secure (HTTPS) connection for location services.
+              </p>
+            </div>
+          )}
+
           {!isOnline && (
             <div className="bg-red-50 p-4 flex items-center">
               <WifiOff className="text-red-500 mr-2" size={20} />
@@ -404,10 +516,19 @@ const StudentAttendance = () => {
                       isGettingLocation ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                     onClick={getCurrentLocation}
-                    disabled={isGettingLocation}
+                    disabled={isGettingLocation || !isSecureContext}
                   >
-                    <MapPin size={16} className="mr-2" />
-                    {isGettingLocation ? 'Getting Location...' : 'Get Current Location'}
+                    {isGettingLocation ? (
+                      <>
+                        <Navigation className="animate-spin mr-2" size={16} />
+                        Getting Location...
+                      </>
+                    ) : (
+                      <>
+                        <MapPin size={16} className="mr-2" />
+                        {location ? 'Update Location' : 'Get Location'}
+                      </>
+                    )}
                   </button>
                 </div>
 
@@ -415,7 +536,12 @@ const StudentAttendance = () => {
                   <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded-md">
                     <div className="flex">
                       <AlertTriangle className="h-5 w-5 text-red-500 mr-2" />
-                      <p className="text-sm text-red-700">{locationError}</p>
+                      <div>
+                        <p className="text-sm text-red-700">{locationError}</p>
+                        <p className="text-xs text-red-600 mt-1">
+                          Please ensure location services are enabled in your device settings.
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -426,14 +552,24 @@ const StudentAttendance = () => {
                       <div className="flex items-center">
                         <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
                         <p className="text-sm text-green-700">
-                          Location acquired: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
+                          Location acquired successfully
                         </p>
                       </div>
-                      {locationAccuracy && (
-                        <p className="text-sm text-green-700 mt-1 ml-7">
-                          Accuracy: ±{Math.round(locationAccuracy)}m
+                      <div className="ml-7 mt-1">
+                        <p className="text-xs text-green-600">
+                          Coordinates: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
                         </p>
-                      )}
+                        {locationAccuracy && (
+                          <p className="text-xs text-green-600">
+                            Accuracy: ±{Math.round(locationAccuracy)}m
+                            {locationAccuracy > 50 && (
+                              <span className="text-yellow-600 ml-1">
+                                (Consider updating location for better accuracy)
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -446,7 +582,9 @@ const StudentAttendance = () => {
                       <ul className="list-disc list-inside mt-1 ml-2">
                         <li>Attendance can only be marked once per day</li>
                         <li>Location services must be enabled</li>
+                        <li>GPS accuracy should be within 100 meters</li>
                         <li>Stable internet connection required</li>
+                        <li>HTTPS connection required for location services</li>
                       </ul>
                     </div>
                   </div>
@@ -455,20 +593,24 @@ const StudentAttendance = () => {
 
               <button
                 type="submit"
-                className={`w-full btn ${
-                  location && isOnline ? 'btn-primary' : 'bg-gray-300 cursor-not-allowed'
+                className={`btn btn-attendance rounded-xl ${
+                  submitting ? 'btn-attendance-loading' : ''
+                } ${
+                  location && isOnline && isSecureContext 
+                    ? 'text-white' 
+                    : 'from-gray-400 to-gray-500 text-white/90'
                 }`}
-                disabled={submitting || !location || !selectedStudent || isGettingLocation || !isOnline}
+                disabled={submitting || !location || !selectedStudent || isGettingLocation || !isOnline || !isSecureContext}
               >
                 {submitting ? (
                   <>
-                    <span className="spinner-border mr-2" />
-                    Marking Attendance...
+                    <span className="spinner-border w-6 h-6 border-3" />
+                    <span className="ml-2">Marking Attendance...</span>
                   </>
                 ) : (
                   <>
-                    <Smartphone className="w-5 h-5 mr-2" />
-                    Mark Attendance
+                    <Smartphone className="w-6 h-6" />
+                    <span>Mark Attendance</span>
                   </>
                 )}
               </button>

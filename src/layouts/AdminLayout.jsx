@@ -34,7 +34,7 @@ const AdminLayout = () => {
     { icon: <LayoutDashboard size={20} />, label: 'Dashboard', path: '/admin' },
     { icon: <Users size={20} />, label: 'Batches', path: '/admin/batches' },
     { icon: <BookOpen size={20} />, label: 'Courses', path: '/admin/courses' },
-    { icon: <Calendar size={20} />, label: 'Schedule', path: '/admin/schedule' },
+    { icon: <Calendar size={20} />, label: 'Student History', path: '/admin/schedule' },
     { icon: <CheckSquare size={20} />, label: 'Attendance', path: '/admin/attendance' },
     { 
       icon: <RefreshCw size={20} />, 

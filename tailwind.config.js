@@ -13,7 +13,17 @@ export default {
           600: '#2563eb',
           700: '#1d4ed8'
         }
-      }
+      },
+      animation: {
+        shimmer: 'shimmer 1.5s infinite',
+      },
+      keyframes: {
+        shimmer: {
+          '100%': {
+            transform: 'translateX(100%)',
+          },
+        },
+      },
     },
   },
   plugins: [],
